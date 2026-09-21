@@ -1,0 +1,111 @@
+name: Build testing plugin
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  SOURCE_REPO: Evernow/AnoMech
+  SOURCE_BRANCH: multiplayer-support
+  INTERNAL_NAME: AnoMechTesting
+  DISPLAY_NAME: AnoMech Testing
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ env.SOURCE_BRANCH }}
+          path: src
+
+      - name: Resolve source commit
+        id: src
+        shell: pwsh
+        run: |
+          $sha = (git -C src rev-parse HEAD).Trim()
+          "sha=$sha" >> $env:GITHUB_OUTPUT
+          "short=$($sha.Substring(0,7))" >> $env:GITHUB_OUTPUT
+          "tag=src-$($sha.Substring(0,7))" >> $env:GITHUB_OUTPUT
+
+      # The cron fires whether or not the branch moved; the release tag is the source commit.
+      - name: Skip commits already released
+        id: gate
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view ${{ steps.src.outputs.tag }} --repo $env:GITHUB_REPOSITORY *> $null
+          $done = $LASTEXITCODE -eq 0
+          $global:LASTEXITCODE = 0
+          if ($done) { "build=false" >> $env:GITHUB_OUTPUT } else { "build=true" >> $env:GITHUB_OUTPUT }
+          exit 0
+
+      - uses: actions/setup-dotnet@v5
+        if: steps.gate.outputs.build == 'true'
+        with:
+          dotnet-version: 9.0.x
+
+      - name: Download Dalamud
+        if: steps.gate.outputs.build == 'true'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri https://goatcorp.github.io/dalamud-distrib/latest.zip -OutFile latest.zip
+          Expand-Archive -Force latest.zip "$env:AppData\XIVLauncher\addon\Hooks\dev"
+
+      # Renamed at build time so the testing build installs alongside upstream's AnoMech and
+      # keeps its own config; the source branch stays untouched.
+      - name: Build
+        if: steps.gate.outputs.build == 'true'
+        shell: pwsh
+        run: |
+          $proj = "src/AnoMech"
+          $manifest = Get-Content "$proj/AnoMech.json" -Raw | ConvertFrom-Json
+          $manifest.Name = $env:DISPLAY_NAME
+          $manifest.RepoUrl = "https://github.com/$env:GITHUB_REPOSITORY"
+          $manifest.Punchline = "Testing build of the AnoMech multiplayer branch."
+          $manifest | ConvertTo-Json -Depth 10 | Set-Content "$proj/$env:INTERNAL_NAME.json" -Encoding UTF8
+
+          $parts = ([xml](Get-Content "$proj/AnoMech.csproj")).SelectSingleNode('//Version').InnerText.Split('.')
+          $version = "$($parts[0]).$($parts[1]).$($parts[2]).$env:GITHUB_RUN_NUMBER"
+          "version=$version" >> $env:GITHUB_ENV
+
+          dotnet build src/AnoMech.sln -c Release -p:Platform=x64 `
+            -p:AssemblyName=$env:INTERNAL_NAME -p:Version=$version
+
+      - name: Collect assets
+        if: steps.gate.outputs.build == 'true'
+        shell: pwsh
+        run: |
+          $json = Get-ChildItem src/AnoMech/bin -Recurse -Filter "$env:INTERNAL_NAME.json" | Select-Object -First 1
+          $zip = Get-ChildItem src/AnoMech/bin -Recurse -Filter *.zip | Select-Object -First 1
+          if (-not $json -or -not $zip) { throw "packager produced no $env:INTERNAL_NAME.json / .zip" }
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item $json.FullName "dist/$env:INTERNAL_NAME.json"
+          Copy-Item $zip.FullName "dist/$env:INTERNAL_NAME.zip"
+
+      # Sync.ps1 in Evernow/DalamudPlugins reads the latest release's two assets by these names.
+      - name: Publish release
+        if: steps.gate.outputs.build == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create ${{ steps.src.outputs.tag }} dist/* `
+            --repo $env:GITHUB_REPOSITORY `
+            --title "$env:version (${{ steps.src.outputs.short }})" `
+            --notes "$env:SOURCE_REPO@$env:SOURCE_BRANCH ${{ steps.src.outputs.sha }}" `
+            --latest
+
+      - name: Mirror the source branch
+        if: steps.gate.outputs.build == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git -C src push --force "https://x-access-token:$env:GH_TOKEN@github.com/$env:GITHUB_REPOSITORY" HEAD:refs/heads/mirror
