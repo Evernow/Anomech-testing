@@ -9,8 +9,8 @@ permissions:
   contents: write
 
 env:
-  SOURCE_REPO: Evernow/AnoMech
-  SOURCE_BRANCH: multiplayer-support
+  SOURCE_REPO: anomek/AnoMech
+  SOURCE_BRANCH: master
   INTERNAL_NAME: AnoMechTesting
   DISPLAY_NAME: AnoMech Testing
 
@@ -49,7 +49,7 @@ jobs:
       - uses: actions/setup-dotnet@v5
         if: steps.gate.outputs.build == 'true'
         with:
-          dotnet-version: 9.0.x
+          dotnet-version: 10.0.x
 
       - name: Download Dalamud
         if: steps.gate.outputs.build == 'true'
@@ -59,7 +59,8 @@ jobs:
           Expand-Archive -Force latest.zip "$env:AppData\XIVLauncher\addon\Hooks\dev"
 
       # Renamed at build time so the testing build installs alongside upstream's AnoMech and
-      # keeps its own config; the source branch stays untouched.
+      # keeps its own config. Only the plugin project is renamed: -p:AssemblyName would also
+      # rename the relay project it references.
       - name: Build
         if: steps.gate.outputs.build == 'true'
         shell: pwsh
@@ -68,15 +69,22 @@ jobs:
           $manifest = Get-Content "$proj/AnoMech.json" -Raw | ConvertFrom-Json
           $manifest.Name = $env:DISPLAY_NAME
           $manifest.RepoUrl = "https://github.com/$env:GITHUB_REPOSITORY"
-          $manifest.Punchline = "Testing build of the AnoMech multiplayer branch."
+          $manifest.Punchline = "Testing build of AnoMech's master branch."
           $manifest | ConvertTo-Json -Depth 10 | Set-Content "$proj/$env:INTERNAL_NAME.json" -Encoding UTF8
 
-          $parts = ([xml](Get-Content "$proj/AnoMech.csproj")).SelectSingleNode('//Version').InnerText.Split('.')
+          $csproj = (Resolve-Path "$proj/AnoMech.csproj").Path
+          $xml = [xml](Get-Content $csproj -Raw)
+          $group = @($xml.Project.PropertyGroup | Where-Object { -not $_.Condition })[0]
+          $assemblyName = $xml.CreateElement('AssemblyName')
+          $assemblyName.InnerText = $env:INTERNAL_NAME
+          [void]$group.AppendChild($assemblyName)
+          $xml.Save($csproj)
+
+          $parts = $xml.SelectSingleNode('//Version').InnerText.Split('.')
           $version = "$($parts[0]).$($parts[1]).$($parts[2]).$env:GITHUB_RUN_NUMBER"
           "version=$version" >> $env:GITHUB_ENV
 
-          dotnet build src/AnoMech.sln -c Release -p:Platform=x64 `
-            -p:AssemblyName=$env:INTERNAL_NAME -p:Version=$version
+          dotnet build $csproj -c Release -p:Platform=x64 -p:Version=$version
 
       - name: Collect assets
         if: steps.gate.outputs.build == 'true'
@@ -101,11 +109,3 @@ jobs:
             --title "$env:version (${{ steps.src.outputs.short }})" `
             --notes "$env:SOURCE_REPO@$env:SOURCE_BRANCH ${{ steps.src.outputs.sha }}" `
             --latest
-
-      - name: Mirror the source branch
-        if: steps.gate.outputs.build == 'true'
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          git -C src push --force "https://x-access-token:$env:GH_TOKEN@github.com/$env:GITHUB_REPOSITORY" HEAD:refs/heads/mirror

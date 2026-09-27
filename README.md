@@ -1,8 +1,7 @@
 # AnoMech Testing
 
-Testing builds of [Evernow/AnoMech](https://github.com/Evernow/AnoMech)'s `multiplayer-support`
-branch. Nothing here is edited by hand — `main` holds only the workflow, and `mirror` is a
-read-only copy of the branch as of the last build.
+Testing builds of [anomek/AnoMech](https://github.com/anomek/AnoMech)'s `master` branch.
+Nothing here is edited by hand — `main` holds only the workflow.
 
 The workflow checks the branch every 15 minutes (and on demand from the Actions tab). When the
 branch has moved it builds a Release plugin, renames it to `AnoMechTesting` so it installs
