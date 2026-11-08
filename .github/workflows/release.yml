@@ -13,6 +13,7 @@ env:
   SOURCE_BRANCH: mp-8-internaltls
   # Merged into SOURCE_BRANCH in this order before the build; space-separated, may be empty.
   MERGE_BRANCHES: fru-ur-spots
+  CONFIGURATION: Debug
   INTERNAL_NAME: AnoMechTesting
   DISPLAY_NAME: AnoMech Testing
 
@@ -41,11 +42,12 @@ jobs:
           $short = @($shas | ForEach-Object { $_.Substring(0,7) }) -join '-'
           $pairs = for ($i = 0; $i -lt $branches.Count; $i++) { "$($branches[$i]) $($shas[$i])" }
           "short=$short" >> $env:GITHUB_OUTPUT
-          "tag=src-$short" >> $env:GITHUB_OUTPUT
+          "tag=src-$short-$($env:CONFIGURATION.ToLower())" >> $env:GITHUB_OUTPUT
           "label=$($branches -join ' + ')" >> $env:GITHUB_OUTPUT
-          "notes=$env:SOURCE_REPO@$($pairs -join ' + ')" >> $env:GITHUB_OUTPUT
+          "notes=$env:CONFIGURATION build of $env:SOURCE_REPO@$($pairs -join ' + ')" >> $env:GITHUB_OUTPUT
 
-      # The cron fires whether or not a branch moved; the release tag names every source commit.
+      # The cron fires whether or not a branch moved; the release tag names every source commit
+      # and the configuration.
       - name: Skip commits already released
         id: gate
         shell: pwsh
@@ -91,7 +93,7 @@ jobs:
           $manifest = Get-Content "$proj/AnoMech.json" -Raw | ConvertFrom-Json
           $manifest.Name = $env:DISPLAY_NAME
           $manifest.RepoUrl = "https://github.com/$env:GITHUB_REPOSITORY"
-          $manifest.Punchline = "Testing build of $env:SOURCE_REPO@${{ steps.src.outputs.label }}."
+          $manifest.Punchline = "Testing $($env:CONFIGURATION.ToLower()) build of $env:SOURCE_REPO@${{ steps.src.outputs.label }}."
           $manifest | ConvertTo-Json -Depth 10 | Set-Content "$proj/$env:INTERNAL_NAME.json" -Encoding UTF8
 
           $csproj = (Resolve-Path "$proj/AnoMech.csproj").Path
@@ -106,18 +108,20 @@ jobs:
           $version = "$($parts[0]).$($parts[1]).$($parts[2]).$env:GITHUB_RUN_NUMBER"
           "version=$version" >> $env:GITHUB_ENV
 
-          dotnet build $csproj -c Release -p:Platform=x64 -p:Version=$version
+          dotnet build $csproj -c $env:CONFIGURATION -p:Platform=x64 -p:Version=$version
 
       - name: Collect assets
         if: steps.gate.outputs.build == 'true'
         shell: pwsh
         run: |
           $json = Get-ChildItem src/AnoMech/bin -Recurse -Filter "$env:INTERNAL_NAME.json" | Select-Object -First 1
-          $zip = Get-ChildItem src/AnoMech/bin -Recurse -Filter *.zip | Select-Object -First 1
-          if (-not $json -or -not $zip) { throw "packager produced no $env:INTERNAL_NAME.json / .zip" }
+          if (-not $json) { throw "packager produced no $env:INTERNAL_NAME.json" }
           New-Item -ItemType Directory dist | Out-Null
           Copy-Item $json.FullName "dist/$env:INTERNAL_NAME.json"
-          Copy-Item $zip.FullName "dist/$env:INTERNAL_NAME.zip"
+          # The packager zips Release builds only; a Debug build's output folder is zipped as it stands.
+          $zip = Get-ChildItem src/AnoMech/bin -Recurse -Filter *.zip | Select-Object -First 1
+          if ($zip) { Copy-Item $zip.FullName "dist/$env:INTERNAL_NAME.zip" }
+          else { Compress-Archive -Path "$($json.DirectoryName)/*" -DestinationPath "dist/$env:INTERNAL_NAME.zip" }
 
       # Sync.ps1 in Evernow/DalamudPlugins reads the latest release's two assets by these names.
       - name: Publish release
