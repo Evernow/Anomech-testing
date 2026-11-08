@@ -10,7 +10,9 @@ permissions:
 
 env:
   SOURCE_REPO: Evernow/AnoMech
-  SOURCE_BRANCH: fru-ur-spots
+  SOURCE_BRANCH: mp-8-internaltls
+  # Merged into SOURCE_BRANCH in this order before the build; space-separated, may be empty.
+  MERGE_BRANCHES: fru-ur-spots
   INTERNAL_NAME: AnoMechTesting
   DISPLAY_NAME: AnoMech Testing
 
@@ -23,17 +25,27 @@ jobs:
           repository: ${{ env.SOURCE_REPO }}
           ref: ${{ env.SOURCE_BRANCH }}
           path: src
+          # Every branch with its history, for the merges.
+          fetch-depth: 0
 
-      - name: Resolve source commit
+      - name: Resolve source commits
         id: src
         shell: pwsh
         run: |
-          $sha = (git -C src rev-parse HEAD).Trim()
-          "sha=$sha" >> $env:GITHUB_OUTPUT
-          "short=$($sha.Substring(0,7))" >> $env:GITHUB_OUTPUT
-          "tag=src-$($sha.Substring(0,7))" >> $env:GITHUB_OUTPUT
+          $branches = @($env:SOURCE_BRANCH) + @($env:MERGE_BRANCHES -split '\s+' | Where-Object { $_ })
+          $shas = @(foreach ($branch in $branches) {
+            $sha = git -C src rev-parse --verify "origin/$branch"
+            if ($LASTEXITCODE) { throw "$env:SOURCE_REPO has no branch $branch" }
+            $sha.Trim()
+          })
+          $short = @($shas | ForEach-Object { $_.Substring(0,7) }) -join '-'
+          $pairs = for ($i = 0; $i -lt $branches.Count; $i++) { "$($branches[$i]) $($shas[$i])" }
+          "short=$short" >> $env:GITHUB_OUTPUT
+          "tag=src-$short" >> $env:GITHUB_OUTPUT
+          "label=$($branches -join ' + ')" >> $env:GITHUB_OUTPUT
+          "notes=$env:SOURCE_REPO@$($pairs -join ' + ')" >> $env:GITHUB_OUTPUT
 
-      # The cron fires whether or not the branch moved; the release tag is the source commit.
+      # The cron fires whether or not a branch moved; the release tag names every source commit.
       - name: Skip commits already released
         id: gate
         shell: pwsh
@@ -45,6 +57,16 @@ jobs:
           $global:LASTEXITCODE = 0
           if ($done) { "build=false" >> $env:GITHUB_OUTPUT } else { "build=true" >> $env:GITHUB_OUTPUT }
           exit 0
+
+      # Merge commits made here are never pushed.
+      - name: Merge branches
+        if: steps.gate.outputs.build == 'true'
+        shell: pwsh
+        run: |
+          foreach ($branch in @($env:MERGE_BRANCHES -split '\s+' | Where-Object { $_ })) {
+            git -C src -c user.name=github-actions -c user.email=github-actions@users.noreply.github.com merge --no-edit "origin/$branch"
+            if ($LASTEXITCODE) { throw "$branch does not merge cleanly into $env:SOURCE_BRANCH" }
+          }
 
       - uses: actions/setup-dotnet@v5
         if: steps.gate.outputs.build == 'true'
@@ -69,7 +91,7 @@ jobs:
           $manifest = Get-Content "$proj/AnoMech.json" -Raw | ConvertFrom-Json
           $manifest.Name = $env:DISPLAY_NAME
           $manifest.RepoUrl = "https://github.com/$env:GITHUB_REPOSITORY"
-          $manifest.Punchline = "Testing build of $env:SOURCE_REPO@$env:SOURCE_BRANCH."
+          $manifest.Punchline = "Testing build of $env:SOURCE_REPO@${{ steps.src.outputs.label }}."
           $manifest | ConvertTo-Json -Depth 10 | Set-Content "$proj/$env:INTERNAL_NAME.json" -Encoding UTF8
 
           $csproj = (Resolve-Path "$proj/AnoMech.csproj").Path
@@ -107,5 +129,5 @@ jobs:
           gh release create ${{ steps.src.outputs.tag }} dist/* `
             --repo $env:GITHUB_REPOSITORY `
             --title "$env:version (${{ steps.src.outputs.short }})" `
-            --notes "$env:SOURCE_REPO@$env:SOURCE_BRANCH ${{ steps.src.outputs.sha }}" `
+            --notes "${{ steps.src.outputs.notes }}" `
             --latest
