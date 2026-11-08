@@ -9,8 +9,8 @@ permissions:
   contents: write
 
 env:
-  SOURCE_REPO: anomek/AnoMech
-  SOURCE_BRANCH: master
+  SOURCE_REPO: Evernow/AnoMech
+  SOURCE_BRANCH: fru-ur-spots
   INTERNAL_NAME: AnoMechTesting
   DISPLAY_NAME: AnoMech Testing
 
@@ -69,7 +69,7 @@ jobs:
           $manifest = Get-Content "$proj/AnoMech.json" -Raw | ConvertFrom-Json
           $manifest.Name = $env:DISPLAY_NAME
           $manifest.RepoUrl = "https://github.com/$env:GITHUB_REPOSITORY"
-          $manifest.Punchline = "Testing build of AnoMech's master branch."
+          $manifest.Punchline = "Testing build of $env:SOURCE_REPO@$env:SOURCE_BRANCH."
           $manifest | ConvertTo-Json -Depth 10 | Set-Content "$proj/$env:INTERNAL_NAME.json" -Encoding UTF8
 
           $csproj = (Resolve-Path "$proj/AnoMech.csproj").Path
